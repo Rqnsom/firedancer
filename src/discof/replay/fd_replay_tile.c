@@ -2098,27 +2098,14 @@ publish_boot_slot( fd_replay_tile_t *  ctx,
    as Agave, even after the reduce_slot_time feature gates are
    active. */
 static fd_slot_params_t
-restore_default_slot_params( fd_bank_t const * bank ) {
-
-  /* A reduction is effective if the effective ns_per_slot is less than
-     the 400ms value.
-     https://github.com/anza-xyz/agave/blob/v4.2/runtime/src/slot_params.rs#L332-L350 */
-  int reduction_effective = fd_slot_params_lookup( &FD_SLOT_PARAMS_400MS,
-                                                   &bank->f.features,
-                                                   &bank->f.epoch_schedule,
-                                                   bank->f.slot ).ns_per_slot < FD_SLOT_PARAMS_400MS.ns_per_slot;
-
-  /* In order to behave correctly in real networks, if a reduction is
-     effective then we use the 400ms slot params as the default. */
-  if( reduction_effective ) {
-    return FD_SLOT_PARAMS_400MS;
-  }
-
-  /* If a reduction is not effective, then we can rely on the slot
-     times having remained constant throughout the lifetime of the
-     cluster, and can use the slot params from the manifest. Note that
-     in test clusters these may differ from the 400ms values. */
-  return bank->f.slot_params;
+restore_default_slot_params( fd_replay_tile_t const * ctx,
+                             fd_bank_t const *        bank ) {
+  fd_slot_params_t genesis_params = fd_slot_params_from_genesis( ctx->genesis );
+  return fd_slot_params_restore_default( &genesis_params,
+                                         &bank->f.slot_params,
+                                         &bank->f.features,
+                                         &bank->f.epoch_schedule,
+                                         bank->f.slot );
 }
 
 /* refresh_vote_account_staked recomputes vote_account_staked from the
@@ -2167,7 +2154,7 @@ init_after_snapshot( fd_replay_tile_t *  ctx,
      manifest. These assertions match Agave:
      https://github.com/anza-xyz/agave/blob/v4.2/runtime/src/bank.rs#L4839-L4869 */
   fd_slot_params_t manifest_params = bank->f.slot_params;
-  bank->f.slot_params_default      = restore_default_slot_params( bank );
+  bank->f.slot_params_default      = restore_default_slot_params( ctx, bank );
   bank->f.slot_params              = fd_slot_params_at_slot( bank, bank->f.slot );
   FD_TEST( bank->f.slot_params.ns_per_slot    == manifest_params.ns_per_slot  );
   FD_TEST( bank->f.slot_params.slots_per_year == manifest_params.slots_per_year );
@@ -4096,6 +4083,9 @@ returnable_frag( fd_replay_tile_t *  ctx,
       break;
     }
     case IN_KIND_SNAP: {
+      /* Booting from the snapshot reads the genesis slot params, so
+         hold the done message until the genesis is parsed. */
+      if( FD_UNLIKELY( fd_ssmsg_sig_message( sig )==FD_SSMSG_DONE && !ctx->has_genesis_hash ) ) return 1;
       on_snapshot_message( ctx, stem, in_idx, chunk, sig );
       maybe_verify_cluster_type( ctx );
       maybe_verify_shred_version( ctx );

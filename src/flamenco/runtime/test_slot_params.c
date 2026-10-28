@@ -1,12 +1,13 @@
 #include "fd_slot_params.h"
 #include "fd_bank.h"
 #include "../features/fd_features.h"
+#include "../genesis/fd_genesis_parse.h"
 #include "sysvar/fd_sysvar_epoch_schedule.h"
 #include <string.h>
 
 /* Tests fd_slot_params against Agave's slot_params.rs cost-limit
    test and test_reduce_slot_time_range_duration.  Default is
-   FD_SLOT_PARAMS_400MS (FD assumes a 400ms genesis). */
+   FD_SLOT_PARAMS_400MS (a 400ms genesis) unless a test sets one. */
 
 #define SLOTS_PER_EPOCH (32UL)
 
@@ -227,21 +228,14 @@ test_range_integration( void ) {
   FD_TEST( range_years( &FD_SLOT_PARAMS_400MS, &f0, &es, 0UL, 100UL )==(double)100UL/FD_SLOT_PARAMS_400MS.slots_per_year );
 }
 
-/* Snapshot-restore baseline selection.  Hand-kept copy of the static
-   fd_replay_tile.c:restore_default_slot_params, FD's analogue of
-   Agave's snapshot_restore_slot_params_baseline
-   (https://github.com/anza-xyz/agave/blob/v4.2/runtime/src/bank.rs#L2775).
-   Returns the slot-0 default: the 400ms baseline once a reduction is
-   effective, else the restored manifest params. */
+/* Snapshot-restore baseline selection with a 400ms genesis. */
 static fd_slot_params_t
 restore_default_slot_params( fd_slot_params_t const *    manifest,
                              fd_features_t const *       features,
                              fd_epoch_schedule_t const * es,
                              ulong                       slot ) {
-  int reduction_effective =
-      fd_slot_params_lookup( &FD_SLOT_PARAMS_400MS, features, es, slot ).ns_per_slot
-        < FD_SLOT_PARAMS_400MS.ns_per_slot;
-  return reduction_effective ? FD_SLOT_PARAMS_400MS : *manifest;
+  fd_slot_params_t genesis = FD_SLOT_PARAMS_400MS;
+  return fd_slot_params_restore_default( &genesis, manifest, features, es, slot );
 }
 
 static void
@@ -288,6 +282,81 @@ test_snapshot_baseline_select( void ) {
   FD_TEST( params_eq( &d3, &manifest_64 ) );
 }
 
+/* fd_genesis_t ends in an account table, so it lives in a
+   footprint-sized buffer. */
+static uchar genesis_mem[ FD_GENESIS_FOOTPRINT( 0UL ) ] __attribute__((aligned(FD_GENESIS_ALIGN)));
+
+static fd_genesis_t const *
+test_genesis( ulong tick_duration_ns,
+              ulong hashes_per_tick ) {
+  fd_genesis_t * genesis = (fd_genesis_t *)genesis_mem;
+  memset( genesis_mem, 0, sizeof(genesis_mem) );
+  genesis->poh.ticks_per_slot   = 64UL;
+  genesis->poh.tick_duration_ns = tick_duration_ns;
+  genesis->poh.hashes_per_tick  = hashes_per_tick;
+  return genesis;
+}
+
+static void
+test_from_genesis( void ) {
+  fd_slot_params_t p400 = fd_slot_params_from_genesis( test_genesis( 6250000UL, 12500UL ) );
+  FD_TEST( p400.ns_per_slot    ==FD_SLOT_PARAMS_400MS.ns_per_slot    );
+  FD_TEST( p400.slots_per_year ==FD_SLOT_PARAMS_400MS.slots_per_year );
+  FD_TEST( p400.hashes_per_tick==12500UL );
+
+  fd_slot_params_t p300 = fd_slot_params_from_genesis( test_genesis( 4687500UL, 0UL ) );
+  FD_TEST( p300.ns_per_slot         ==FD_SLOT_PARAMS_300MS.ns_per_slot          );
+  FD_TEST( p300.ns_per_slot_adjusted==FD_SLOT_PARAMS_300MS.ns_per_slot_adjusted );
+  FD_TEST( p300.slots_per_year      ==FD_SLOT_PARAMS_300MS.slots_per_year       );
+  FD_TEST( p300.max_shred_idx       ==FD_SLOT_PARAMS_400MS.max_shred_idx        );
+}
+
+/* 300ms genesis with all four gates activated at slot 0, so effective
+   at slot 32.  A bank restored after slot 32 must count slots 0-31 at
+   300ms, as a bank booted from genesis does. */
+static void
+test_snapshot_baseline_genesis_300ms( void ) {
+  fd_epoch_schedule_t es      = test_epoch_schedule();
+  fd_slot_params_t    genesis = fd_slot_params_from_genesis( test_genesis( 4687500UL, 0UL ) );
+
+  fd_features_t f = no_features();
+  f.reduce_slot_time_to_350ms = 0UL;
+  f.reduce_slot_time_to_300ms = 0UL;
+  f.reduce_slot_time_to_250ms = 0UL;
+  f.reduce_slot_time_to_200ms = 0UL;
+
+  /* Restored before slot 32: the manifest still holds the genesis
+     timing. */
+  fd_slot_params_t d_pre = fd_slot_params_restore_default( &genesis, &genesis, &f, &es, 13UL );
+  FD_TEST( params_eq( &d_pre, &genesis ) );
+
+  /* Restored at slot 70: the manifest holds 200ms. */
+  fd_slot_params_t manifest_200 = FD_SLOT_PARAMS_200MS;
+  fd_slot_params_t d_post       = fd_slot_params_restore_default( &genesis, &manifest_200, &f, &es, 70UL );
+  FD_TEST( params_eq( &d_post, &genesis ) );
+
+  /* The inflation input over slots 0-63 matches a genesis-booted bank,
+     and differs from a 400ms baseline. */
+  FD_TEST( range_years( &d_post,               &f, &es, 0UL, 64UL )==range_years( &genesis, &f, &es, 0UL, 64UL ) );
+  FD_TEST( range_years( &FD_SLOT_PARAMS_400MS, &f, &es, 0UL, 64UL )!=range_years( &genesis, &f, &es, 0UL, 64UL ) );
+
+  /* The 350ms gate is no reduction for a 300ms genesis: keep the
+     manifest. */
+  fd_features_t f350 = no_features();
+  f350.reduce_slot_time_to_350ms = 0UL;
+  fd_slot_params_t manifest_noop = genesis;
+  manifest_noop.hashes_per_tick  = 57500UL;
+  fd_slot_params_t d_noop = fd_slot_params_restore_default( &genesis, &manifest_noop, &f350, &es, 70UL );
+  FD_TEST( d_noop.hashes_per_tick==57500UL );
+
+  /* The 300ms gate counts, as in Agave (<= the genesis slot time). */
+  fd_features_t f300 = no_features();
+  f300.reduce_slot_time_to_300ms = 0UL;
+  fd_slot_params_t manifest_300 = FD_SLOT_PARAMS_300MS;
+  fd_slot_params_t d_eq         = fd_slot_params_restore_default( &genesis, &manifest_300, &f300, &es, 70UL );
+  FD_TEST( params_eq( &d_eq, &genesis ) );
+}
+
 /* Test that all the regimes have different ns_per_slot  */
 static void
 test_distinct_regimes( void ) {
@@ -314,6 +383,8 @@ main( int     argc,
   test_out_of_order_range();
   test_out_of_order_all_gates();
   test_snapshot_baseline_select();
+  test_from_genesis();
+  test_snapshot_baseline_genesis_300ms();
   test_distinct_regimes();
 
   FD_LOG_NOTICE(( "pass" ));

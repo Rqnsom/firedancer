@@ -155,6 +155,28 @@ fd_slot_params_lookup( fd_slot_params_t const *    default_params,
                        fd_epoch_schedule_t const * epoch_schedule,
                        ulong                       slot );
 
+/* fd_slot_params_from_genesis returns the slot params before any
+   reduce_slot_time gate: the 400ms table with the genesis slot timing.
+   https://github.com/anza-xyz/agave/blob/v4.5.0-alpha.4/runtime/src/bank.rs#L2894-L2905 */
+
+fd_slot_params_t
+fd_slot_params_from_genesis( fd_genesis_t const * genesis );
+
+/* fd_slot_params_restore_default returns the default params of a bank
+   restored from a snapshot at the given slot.  Once a gate at or below
+   the genesis slot time is effective, the manifest only holds the
+   reduced regime, so the genesis params are returned.  Otherwise the
+   manifest params are returned.
+   https://github.com/anza-xyz/agave/blob/v4.5.0-alpha.4/runtime/src/bank.rs#L2938-L2961
+   https://github.com/anza-xyz/agave/blob/v4.5.0-alpha.4/runtime/src/slot_params.rs#L332-L349 */
+
+fd_slot_params_t
+fd_slot_params_restore_default( fd_slot_params_t const *    genesis_params,
+                                fd_slot_params_t const *    manifest_params,
+                                fd_features_t const *       features,
+                                fd_epoch_schedule_t const * epoch_schedule,
+                                ulong                       slot );
+
 /* fd_slot_params_effective_slot returns the slot at which the given
    slot params regime takes effect. */
 
